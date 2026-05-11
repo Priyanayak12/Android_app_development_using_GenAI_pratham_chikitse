@@ -355,8 +355,8 @@ fun InfoScreen() {
         if (selectedTab == 0) {
             LazyVerticalGrid(columns = GridCells.Fixed(2), contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxSize()) {
                 val infoCards = listOf(
-                    Triple("What is First Aid", Icons.Default.Add, "First aid is the first and immediate assistance given to any person suffering from either a minor or serious illness or injury..."),
-                    Triple("Why Learn First Aid", Icons.Default.Person, "Learning first aid empowers you to help people in need. It can save lives and reduce recovery time..."),
+                    Triple("What is First Aid", Icons.Default.Add, "First aid is the first and immediate assistance given to any person suffering from either a minor or serious illness or injury."),
+                    Triple("Why Learn First Aid", Icons.Default.Person, "Learning first aid empowers you to help people in need. It can save lives and reduce recovery time."),
                     Triple("Aims of First Aid", Icons.Default.CheckCircle, "The main aims of first aid are the 3 P's:\n\n• Preserve life\n• Prevent further injury\n• Promote recovery"),
                     Triple("First Aid Kit Info", Icons.Default.Favorite, "A well-stocked first-aid kit can help you respond effectively to common injuries and emergencies.")
                 )
@@ -425,7 +425,8 @@ fun KitScreen() {
         KitItem("flashlight and extra batteries", R.drawable.flashlight_and_batteries),
         KitItem("a blanket", R.drawable.a_blanket),
         KitItem("mouthpiece CPR", R.drawable.mouthpiece_cpr),
-        KitItem("emergency numbers", R.drawable.emergency_numbers)
+        KitItem("cotton", R.drawable.cotton)
+
     )
 
     Column(modifier = Modifier.fillMaxSize().background(Color(0xFFF8F9FA))) {
