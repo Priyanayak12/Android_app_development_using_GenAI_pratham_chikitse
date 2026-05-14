@@ -1,5 +1,5 @@
 package com.example.prathamchikitse
-
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -7,20 +7,13 @@ import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.grid.*
+import androidx.compose.foundation.pager.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
@@ -35,119 +28,132 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.room.*
 import com.example.prathamchikitse.ui.theme.PrathamChikitseTheme
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.util.*
-
-// --- DATA MODELS ---
+// --- 1. MODELS ---
 enum class BottomTab { HOME, INFO, KIT, QUIZ }
-
 enum class AudioState(val label: String, val color: Color) {
     OFF("AUDIO: OFF", Color.DarkGray),
     ENGLISH("AUDIO: ENGLISH", Color(0xFF1565C0)),
     KANNADA("AUDIO: KANNADA", Color(0xFF2E7D32)),
     BOTH("AUDIO: BOTH", Color(0xFF6A1B9A))
 }
-
 data class KitItem(val name: String, val imageResId: Int)
 data class Hospital(val name: String, val distance: String, val status: String)
-
-data class EmergencyItem(
-    val id: Int, val name: String, val kannadaName: String, val color: Color, val imageResId: Int,
-    val steps: List<FirstAidStep>, val dos: List<Pair<String, String>>, val donts: List<Pair<String, String>>
-)
-
+data class EmergencyItem(val id: Int, val name: String, val kannadaName: String, val color: Color, val imageResId: Int, val steps: List<FirstAidStep>, val dos: List<Pair<String, String>>, val donts: List<Pair<String, String>>)
 data class FirstAidStep(val stepNumber: Int, val instruction: String, val kannadaInstruction: String)
-
-data class Question(
-    val question: String,
-    val kanQuestion: String,
-    val options: List<String>,
-    val kanOptions: List<String>,
-    val correctAnswer: Int
-)
-
-// --- MAIN ACTIVITY ---
+data class Question(val question: String, val kanQuestion: String, val options: List<String>, val kanOptions: List<String>, val correctAnswer: Int)
+// --- 2. ROOM DATABASE ---
+@Entity(tableName = "users")
+data class User(@PrimaryKey val email: String, val password: String)
+@Dao
+interface UserDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun registerUser(user: User)
+    @Query("SELECT * FROM users WHERE email = :email AND password = :password") suspend fun loginUser(email: String, password: String): User?
+}
+@Database(entities = [User::class], version = 1, exportSchema = false)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun userDao(): UserDao
+    companion object {
+        @Volatile private var INSTANCE: AppDatabase? = null
+        fun getDatabase(context: Context): AppDatabase = INSTANCE ?: synchronized(this) {
+            Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "first_aid_db").build().also { INSTANCE = it }
+        }
+    }
+}
+// --- 3. VIEWMODEL ---
+class LoginViewModel(private val userDao: UserDao) : ViewModel() {
+    private val _status = MutableStateFlow<String?>(null)
+    val status: StateFlow<String?> = _status
+    fun onRegister(user: User) { viewModelScope.launch { userDao.registerUser(user); _status.value = "Registration Successful! Now Login." } }
+    fun onLogin(user: User, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val u = userDao.loginUser(user.email, user.password)
+            if (u != null) onResult(true) else _status.value = "Invalid Email or Password"
+        }
+    }
+}
+// --- 4. MAIN ACTIVITY ---
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private lateinit var tts: TextToSpeech
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         tts = TextToSpeech(this, this)
-
         setContent {
             PrathamChikitseTheme {
-                var showSplash by remember { mutableStateOf(true) }
-                var showHospitals by remember { mutableStateOf(false) }
-                var selectedEmergency by remember { mutableStateOf<EmergencyItem?>(null) }
-                var currentBottomTab by remember { mutableStateOf(BottomTab.HOME) }
+                val db = AppDatabase.getDatabase(LocalContext.current)
+                val vm: LoginViewModel = viewModel { LoginViewModel(db.userDao()) }
 
-                if (showSplash) {
-                    FrontPageScreen(onEnter = { showSplash = false })
+                var splash by remember { mutableStateOf(true) }
+                var currentUserEmail by remember { mutableStateOf<String?>(null) }
+                var hospitals by remember { mutableStateOf(false) }
+                var selected by remember { mutableStateOf<EmergencyItem?>(null) }
+                var tab by remember { mutableStateOf(BottomTab.HOME) }
+                if (splash) {
+                    FrontPageScreen { splash = false }
+                } else if (currentUserEmail == null) {
+                    // LOGIN GATE: Shown after splash but before app content
+                    LoginScreen(
+                        vm = vm,
+                        onOk = { email -> currentUserEmail = email },
+                        onSkip = { currentUserEmail = "Guest" }
+                    )
                 } else {
                     Scaffold(
                         bottomBar = {
-                            if (selectedEmergency == null && !showHospitals) {
-                                NavigationBar(containerColor = Color.White, modifier = Modifier.shadow(8.dp)) {
-                                    val tabs = listOf(
+                            if (selected == null && !hospitals) {
+                                NavigationBar(containerColor = Color.White) {
+                                    val items = listOf(
                                         Triple(BottomTab.HOME, Icons.Default.Home, "Home"),
                                         Triple(BottomTab.INFO, Icons.Default.Info, "Info"),
                                         Triple(BottomTab.KIT, Icons.Default.Favorite, "Kit"),
-                                        Triple(BottomTab.QUIZ, Icons.Default.CheckCircle, "Quiz")
+                                        Triple(BottomTab.QUIZ, Icons.Default.CheckCircle, "Quiz"),
                                     )
-                                    tabs.forEach { (tab, icon, label) ->
-                                        NavigationBarItem(
-                                            selected = currentBottomTab == tab,
-                                            onClick = { currentBottomTab = tab },
-                                            icon = { Icon(icon, contentDescription = label) },
-                                            label = { Text(label) },
-                                            colors = NavigationBarItemDefaults.colors(
-                                                selectedIconColor = Color(0xFFD32F2F),
-                                                unselectedIconColor = Color.Gray,
-                                                selectedTextColor = Color(0xFFD32F2F),
-                                                indicatorColor = Color(0xFFFFEBEE)
-                                            )
-                                        )
+                                    items.forEach { (t, i, l) ->
+                                        NavigationBarItem(selected = tab == t, onClick = { tab = t }, icon = { Icon(i, l) }, label = { Text(l) })
                                     }
                                 }
                             }
                         },
                         floatingActionButton = {
-                            if (selectedEmergency == null && !showHospitals && currentBottomTab == BottomTab.HOME) {
+                            if (selected == null && !hospitals && tab == BottomTab.HOME) {
                                 ExtendedFloatingActionButton(
                                     onClick = { startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:108"))) },
                                     containerColor = Color(0xFFD32F2F), contentColor = Color.White,
-                                    icon = { Icon(Icons.Default.Call, "Call SOS") },
-                                    text = { Text("CALL 108", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-                                    elevation = FloatingActionButtonDefaults.elevation(8.dp)
+                                    icon = { Icon(Icons.Default.Call, null) },
+                                    text = { Text("CALL 108", fontWeight = FontWeight.Bold) }
                                 )
                             }
                         }
-                    ) { padding ->
-                        Surface(modifier = Modifier.fillMaxSize().padding(padding), color = Color(0xFFF8F9FA)) {
-                            if (showHospitals) {
-                                HospitalFinderScreen(onBack = { showHospitals = false })
-                            } else if (selectedEmergency != null) {
-                                DetailScreen(
-                                    item = selectedEmergency!!,
-                                    onBack = { selectedEmergency = null },
-                                    onSpeak = { text -> tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, null) },
-                                    tts = tts
+                    ) { p ->
+                        Surface(Modifier.padding(p).fillMaxSize(), color = Color(0xFFF8F9FA)) {
+                            if (hospitals) HospitalFinderScreen { hospitals = false }
+                            else if (selected != null) DetailScreen(selected!!, { selected = null }, { tts.speak(it, TextToSpeech.QUEUE_FLUSH, null, null) }, tts)
+                            else when (tab) {
+                                BottomTab.HOME -> HomeScreen(
+                                    onItemClick = { selected = it },
+                                    onFindHospitalsClick = { hospitals = true },
+
                                 )
-                            } else {
-                                when (currentBottomTab) {
-                                    BottomTab.HOME -> HomeScreen(onItemClick = { selectedEmergency = it }, onFindHospitalsClick = { showHospitals = true })
-                                    BottomTab.INFO -> InfoScreen()
-                                    BottomTab.KIT -> KitScreen()
-                                    BottomTab.QUIZ -> QuizScreen()
-                                }
+                                BottomTab.INFO -> InfoScreen()
+                                BottomTab.KIT -> KitScreen()
+                                BottomTab.QUIZ -> QuizScreen()
                             }
                         }
                     }
@@ -155,25 +161,46 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             }
         }
     }
+    override fun onInit(s: Int) { if (s == TextToSpeech.SUCCESS) tts.setLanguage(Locale("kn", "IN")) }
+    override fun onDestroy() { tts.stop(); tts.shutdown(); super.onDestroy() }
+}
+// --- 5. SCREENS ---
+@Composable
+fun LoginScreen(vm: LoginViewModel, onOk: (String) -> Unit, onSkip: () -> Unit) {
+    var email by remember { mutableStateOf("") }; var pass by remember { mutableStateOf("") }
+    var isSignUp by remember { mutableStateOf(false) }; val status by vm.status.collectAsState()
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val result = tts.setLanguage(Locale("kn", "IN"))
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                tts.setLanguage(Locale("en", "IN")) // Fallback
+    Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFFD32F2F), Color(0xFF880E4F)))), contentAlignment = Alignment.Center) {
+        Column(modifier = Modifier.padding(24.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(Icons.Default.Lock, null, tint = Color.White, modifier = Modifier.size(70.dp))
+            Text(if (isSignUp) "Register" else "Login", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Black)
+            status?.let { Text(it, color = Color.Yellow, textAlign = TextAlign.Center) }
+            Spacer(Modifier.height(20.dp))
+            Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                Column(Modifier.padding(24.dp)) {
+                    OutlinedTextField(email, { email = it }, label = { Text("Email") }, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(pass, { pass = it }, label = { Text("Password") }, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation())
+                    Button(
+                        onClick = {
+                            if (isSignUp) {
+                                vm.onRegister(User(email, pass))
+                            } else {
+                                vm.onLogin(User(email, pass)) { success -> if (success) onOk(email) }
+                            }
+                        },
+                        Modifier.fillMaxWidth().height(55.dp).padding(top = 16.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
+                    ) {
+                        Text(if (isSignUp) "SIGN UP" else "SIGN IN")
+                    }
+                }
             }
+            TextButton(onClick = { isSignUp = !isSignUp }) { Text(if (isSignUp) "Already have an account? Login" else "New here? Create Account", color = Color.White) }
+            TextButton(onClick = onSkip) { Text("CONTINUE AS GUEST", color = Color.Black.copy(0.6f)) }
         }
     }
-
-    override fun onDestroy() {
-        tts.stop()
-        tts.shutdown()
-        super.onDestroy()
-    }
 }
-
-// --- SCREENS & COMPONENTS ---
-
 @Composable
 fun QuizScreen() {
     val questions = remember {
@@ -190,14 +217,11 @@ fun QuizScreen() {
             Question("What to give a conscious diabetic in shock?", "ಮಧುಮೇಹ ಆಘಾತವಾದಾಗ ಎಚ್ಚರವಿದ್ದವರಿಗೆ ಏನು ನೀಡಬೇಕು?", listOf("Insulin", "Sugar/Candy", "Water"), listOf("ಇನ್ಸುಲಿನ್", "ಸಕ್ಕರೆ/ಸಿಹಿ", "ನೀರು"), 1)
         )
     }
-
     var currentQuestionIdx by remember { mutableIntStateOf(0) }
     var score by remember { mutableIntStateOf(0) }
     var showResult by remember { mutableStateOf(false) }
-
     val scrollState = rememberScrollState()
-    val scope = rememberCoroutineScope() // FIXED: Added missing CoroutineScope
-
+    val scope = rememberCoroutineScope()
     Column(modifier = Modifier.fillMaxSize().background(Color(0xFFF8F9FA))) {
         Box(modifier = Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color(0xFFFF5252), Color(0xFFD32F2F)))).padding(24.dp).padding(top = 16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -208,39 +232,22 @@ fun QuizScreen() {
                 Icon(Icons.Default.CheckCircle, null, tint = Color.White, modifier = Modifier.size(50.dp))
             }
         }
-
         if (showResult) {
             QuizResultScreen(score = score, total = questions.size) {
-                currentQuestionIdx = 0
-                score = 0
-                showResult = false
+                currentQuestionIdx = 0; score = 0; showResult = false
             }
         } else {
             val q = questions[currentQuestionIdx]
-
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp)
-                    .verticalScroll(scrollState),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
+            Column(modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(scrollState), horizontalAlignment = Alignment.CenterHorizontally) {
                 LinearProgressIndicator(
                     progress = { (currentQuestionIdx + 1).toFloat() / questions.size },
                     modifier = Modifier.fillMaxWidth().height(10.dp).clip(CircleShape),
-                    color = Color(0xFFD32F2F),
-                    trackColor = Color(0xFFFFEBEE),
+                    color = Color(0xFFD32F2F), trackColor = Color(0xFFFFEBEE),
                 )
                 Spacer(Modifier.height(12.dp))
                 Text("Question ${currentQuestionIdx + 1} of ${questions.size}", fontWeight = FontWeight.Bold, color = Color.Black)
                 Spacer(Modifier.height(24.dp))
-
-                Card(
-                    modifier = Modifier.fillMaxWidth().wrapContentHeight(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                    elevation = CardDefaults.cardElevation(4.dp)
-                ) {
+                Card(modifier = Modifier.fillMaxWidth().wrapContentHeight(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(4.dp)) {
                     Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(q.question, fontSize = 22.sp, fontWeight = FontWeight.Black, color = Color.Black, textAlign = TextAlign.Center, lineHeight = 28.sp)
                         Spacer(Modifier.height(12.dp))
@@ -248,7 +255,6 @@ fun QuizScreen() {
                     }
                 }
                 Spacer(Modifier.height(32.dp))
-
                 q.options.forEachIndexed { index, option ->
                     Button(
                         onClick = {
@@ -256,18 +262,11 @@ fun QuizScreen() {
                             if (currentQuestionIdx < questions.size - 1) {
                                 currentQuestionIdx++
                                 scope.launch { scrollState.scrollTo(0) }
-                            } else {
-                                showResult = true
-                            }
+                            } else { showResult = true }
                         },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp)
-                            .wrapContentHeight(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
-                        elevation = ButtonDefaults.buttonElevation(4.dp),
-                        contentPadding = PaddingValues(16.dp)
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).wrapContentHeight(),
+                        shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
+                        elevation = ButtonDefaults.buttonElevation(4.dp), contentPadding = PaddingValues(16.dp)
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(option, fontWeight = FontWeight.Bold, fontSize = 16.sp, textAlign = TextAlign.Center, lineHeight = 20.sp)
@@ -276,12 +275,10 @@ fun QuizScreen() {
                         }
                     }
                 }
-                Spacer(Modifier.height(40.dp))
             }
         }
     }
 }
-
 @Composable
 fun QuizResultScreen(score: Int, total: Int, onRestart: () -> Unit) {
     Column(modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
@@ -292,23 +289,12 @@ fun QuizResultScreen(score: Int, total: Int, onRestart: () -> Unit) {
         Text("Quiz Completed!", fontSize = 28.sp, fontWeight = FontWeight.Black)
         Spacer(Modifier.height(8.dp))
         Text("Your Score: $score / $total", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFFD32F2F))
-        Spacer(Modifier.height(24.dp))
-        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(2.dp)) {
-            Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(if (score > 7) "Excellent! You are a First-Aid Hero." else "Good effort! Keep learning to be more prepared.", textAlign = TextAlign.Center, fontSize = 16.sp)
-                if (score > 7) {
-                    Spacer(Modifier.height(16.dp))
-                    Text("CERTIFICATE OF READINESS EARNED", fontWeight = FontWeight.ExtraBold, color = Color(0xFFB8860B), fontSize = 14.sp)
-                }
-            }
-        }
         Spacer(Modifier.height(48.dp))
         Button(onClick = onRestart, modifier = Modifier.fillMaxWidth().height(55.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))) {
             Text("RETRY QUIZ", fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
     }
 }
-
 @Composable
 fun InfoScreen() {
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -355,8 +341,8 @@ fun InfoScreen() {
         if (selectedTab == 0) {
             LazyVerticalGrid(columns = GridCells.Fixed(2), contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxSize()) {
                 val infoCards = listOf(
-                    Triple("What is First Aid", Icons.Default.Add, "First aid is the first and immediate assistance given to any person suffering from either a minor or serious illness or injury."),
-                    Triple("Why Learn First Aid", Icons.Default.Person, "Learning first aid empowers you to help people in need. It can save lives and reduce recovery time."),
+                    Triple("What is First Aid", Icons.Default.Add, "First aid is the first and immediate assistance given to any person suffering from either a minor or serious illness or injury..."),
+                    Triple("Why Learn First Aid", Icons.Default.Person, "Learning first aid empowers you to help people in need. It can save lives and reduce recovery time..."),
                     Triple("Aims of First Aid", Icons.Default.CheckCircle, "The main aims of first aid are the 3 P's:\n\n• Preserve life\n• Prevent further injury\n• Promote recovery"),
                     Triple("First Aid Kit Info", Icons.Default.Favorite, "A well-stocked first-aid kit can help you respond effectively to common injuries and emergencies.")
                 )
@@ -381,7 +367,18 @@ fun InfoScreen() {
                 "Tourniquet" to "A device used to stop severe bleeding from a limb.",
                 "Anaphylaxis" to "A severe, potentially life-threatening allergic reaction.",
                 "Asphyxia" to "A condition where the body is deprived of oxygen.",
-                "Shock" to "A critical condition caused by a sudden drop in blood flow."
+                "Shock" to "A critical condition caused by a sudden drop in blood flow.",
+                "Heimlich Maneuver" to "A first-aid procedure used to treat upper airway obstructions by foreign objects.",
+                "Epinephrine" to "A medication (often in an EpiPen) used to treat severe allergic reactions.",
+                "Hemorrhage" to "The medical term for profuse or heavy bleeding.",
+                "Concussion" to "A type of traumatic brain injury caused by a bump, blow, or jolt to the head.",
+                "Hypothermia" to "A medical emergency that occurs when your body loses heat faster than it can produce it.",
+                "Heat Stroke" to "A condition caused by your body overheating, usually as a result of prolonged exposure to high temperatures.",
+                "Splint" to "A rigid or flexible device used to keep a joint or bone from moving.",
+                "Recovery Position" to "A safe position to place an unconscious but breathing person to keep their airway open.",
+                "Laceration" to "A deep cut or tear in skin or flesh.",
+                "Sterile" to "Completely free from bacteria or other living microorganisms."
+
             )
             LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
                 items(glossaryTerms.size) { index ->
@@ -426,7 +423,6 @@ fun KitScreen() {
         KitItem("a blanket", R.drawable.a_blanket),
         KitItem("mouthpiece CPR", R.drawable.mouthpiece_cpr),
         KitItem("cotton", R.drawable.cotton)
-
     )
 
     Column(modifier = Modifier.fillMaxSize().background(Color(0xFFF8F9FA))) {
@@ -455,7 +451,6 @@ fun KitScreen() {
         }
     }
 }
-
 @Composable
 fun MedicalIllustration(color: Color, imageResId: Int) {
     Box(
@@ -734,7 +729,8 @@ fun HospitalFinderScreen(onBack: () -> Unit) {
     }
 }
 
-// ----------------- OFFLINE DATA REQUIRING DRAWABLE ASSETS -----------------
+
+
 val emergencies = listOf(
     EmergencyItem(
         1, "CPR (Life Saving)", "ಸಿಪಿಆರ್ (ಜೀವ ರಕ್ಷಕ)", Color(0xFFD32F2F), R.drawable.cpr_illustration,
